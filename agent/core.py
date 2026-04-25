@@ -85,12 +85,42 @@ class Agent:
             response = self._call_llm()
             print(f"响应: {response}")
             # 2. 解析 Thought 和 Action
-            action, thought = self._parse_response(response)
-            print(f"action: {action}")
-            print(f"thought: {thought}")
+            max_retires = 3
+            for retry in range(max_retires):
+                try:
+                    action, thought = self._parse_response(response)
+                    if not action:
+                        raise ValueError("Action 为空")
+                    break
+                except Exception as e:
+                    # 解析失败 → 自纠错：把报错信息塞回 messages
+                    error_msg = f"格式错误：{e}。请严格按照 Thought: ... Action: ... 格式输出，不要输出其他内容。"
+                    print(f"⚠️ 解析失败 (重试 {retry + 1}/{max_retries}): {e}")
+                    
+                    # 把 LLM 的错误输出和报错信息都塞回 messages
+                    self.messages.append({"role": "assistant", "content": response})
+                    self.messages.append({"role": "user", "content": error_msg})
+                    response = self._call_llm()
+                    print(f"response: {response}")
+            else:
+                print(f"解析最大次数使用完: {max_retires}")
+                continue
+            print(f"action: {action}, thought: {thought}")
+
             # 3. 执行 Action
             observation = self._execute_action(thought)
             print(f"Observation: {observation}")
+            if "成功" in observation:
+                print(f"Observation: {observation}")
+                print(f"✅ 检测到成功，自动结束")
+                self.step_logs.append({
+                    "step": step + 1,
+                    "thought": thought,
+                    "action": "Finish[任务完成]",
+                    "observation": observation
+                })
+                return self._build_result()
+        
             # 4. 记录日志
             self.step_logs.append({
                 "step": step + 1,
@@ -149,9 +179,10 @@ class Agent:
                 content = match.group(2).strip()
                 try:
                     create_file(file_str, content)
+                    return "成功操作 create_file "
                 except Exception as e:
                     return f"错误: {e}"
-            return "错误: create_file 格式不正确"
+            
         elif action.startswith("finish"):
             return "任务完成"
         else:
