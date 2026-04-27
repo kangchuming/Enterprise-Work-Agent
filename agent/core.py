@@ -11,6 +11,7 @@ from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
 from tools.file_manager import create_file
 from agent.identity import get_identity_prompt
+from agent.guard import _resolve_path, guard_command
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -85,8 +86,8 @@ class Agent:
             response = self._call_llm()
             print(f"响应: {response}")
             # 2. 解析 Thought 和 Action
-            max_retires = 3
-            for retry in range(max_retires):
+            max_retries = 3
+            for retry in range(max_retries):
                 try:
                     action, thought = self._parse_response(response)
                     if not action:
@@ -103,7 +104,7 @@ class Agent:
                     response = self._call_llm()
                     print(f"response: {response}")
             else:
-                print(f"解析最大次数使用完: {max_retires}")
+                print(f"解析最大次数使用完: {max_retries}")
                 continue
             print(f"action: {action}, thought: {thought}")
 
@@ -177,6 +178,14 @@ class Agent:
             if match:
                 file_str = match.group(1).strip()
                 content = match.group(2).strip()
+
+                # ✅ Guard: 路径安全检查
+                try:
+                    data_dir = Path(project_root) / "kcm"
+                    _resolve_path(file_str, data_dir)
+                except PermissionError as e:
+                    return f"拒绝操作: {e}"
+
                 try:
                     create_file(file_str, content)
                     return "成功操作 create_file "
