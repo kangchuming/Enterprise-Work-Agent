@@ -6,6 +6,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 from openai import OpenAI
+from agent.history import History   # ← 新增
 import re
 from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
@@ -47,14 +48,15 @@ class OpenAICompatibleClient:
 class Agent:
     """封装配置和客户端的 Agent 类"""
     
-    def __init__(self, max_step: int = 5):
+    def __init__(self, max_step: int = 5, max_messages: int = 50, max_token: int = 4000):
         # 自动从 .env 加载配置
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("OPENAI_BASE_URL")
         self.model = os.getenv("MODEL_NAME")
         self.max_step = max_step
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-        self.messages = []
+        self.history = History(max_messages=max_messages, max_token=max_token)
+        self.system_prompt = ""
         self.step_logs = []
 
     def run(self, input_str: str):
@@ -66,16 +68,17 @@ class Agent:
         )
         
         # 构建完整的 system_prompt
-        system_prompt = get_create_loop_prompt(
+        self.system_prompt = get_create_loop_prompt(
             identity=identity,
             input="请创建 test.txt 文件，内容是 Hello",
             history=""
         )
 
-        self.messages = [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': input_str}
-        ]
+        # self.messages = [
+        #     {'role': 'system', 'content': system_prompt},
+        #     {'role': 'user', 'content': input_str}
+        # ]
+        self.history.add_user(input_str) 
 
         for step in range(self.max_step):
             print(f"\n{'='*40}")
@@ -99,8 +102,8 @@ class Agent:
                     print(f"⚠️ 解析失败 (重试 {retry + 1}/{max_retries}): {e}")
                     
                     # 把 LLM 的错误输出和报错信息都塞回 messages
-                    self.messages.append({"role": "assistant", "content": response})
-                    self.messages.append({"role": "user", "content": error_msg})
+                    self.history.add_assistant(response)
+                    self.history.add_user(error_msg)
                     response = self._call_llm()
                     print(f"response: {response}")
             else:
@@ -130,14 +133,8 @@ class Agent:
                 "observation": observation
             })
             # 5. 结果塞回 messagess
-            self.messages.append({
-                "role": "assistant",
-                "content": f"Thought: {thought}\nAction: {action}"
-            })
-            self.messages.append({
-                "role": "user",
-                "content": f"Observation: {observation}"
-            })
+            self.history.add_assistant(f"Thought: {thought}\nAction: {action}")   # ←
+            self.history.add_user(f"Observation: {observation}")     
             # 6. 检查是否完成
             # response = self.client.generate(system_prompt= system_prompt)
             # print(f"响应: {response}")
@@ -149,10 +146,12 @@ class Agent:
 
     def _call_llm(self) -> str:
         """调用 LLM"""
+        msgs = self.history.build(self.system_prompt)
+        print(f"[DEBUG] 发送 {len(msgs)} 条消息，约 {sum(len(str(m.get('content',''))) for m in msgs)} 字符")
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=self.messages,
+                messages=self.history.build(self.system_prompt),
                 stream=False
             )
             answer = response.choices[0].message.content
