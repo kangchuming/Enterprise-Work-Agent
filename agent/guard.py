@@ -21,23 +21,27 @@ DENY_PATTERNS = [
     r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)", 
 ]
 
- 
-def _resolve_path(path: str, allowed_dir: Path) -> Path:
-    p = Path(path).expanduser().resolve()
+class Guard:
+    """封住配置Guard防护栏"""
 
-    # 允许目录不存在时也创建
-    allowed_dir.mkdir(parents=True, exist_ok=True)
-    allowed_dir = allowed_dir.resolve()
-    
-    try:
-        p.relative_to(allowed_dir.resolve())
-        return p
-    except ValueError:
-        raise PermissionError(f"路径 {path} 超出允许范围 {allowed_dir}")
+    def _resolve_path(self, path: str, allowed_dir: Path) -> Path:
+        p = Path(path).expanduser().resolve()
+
+        # 允许目录不存在时也创建
+        allowed_dir.mkdir(parents=True, exist_ok=True)
+        allowed_dir = allowed_dir.resolve()
+        
+        
+        try:
+            p.relative_to(allowed_dir.resolve())
+            return p
+        except ValueError:
+            raise PermissionError(f"路径 {path} 超出允许范围 {allowed_dir}")
     
 
-def guard_command(cmd: str) -> str | None:
-    for pattern in DENY_PATTERNS:
-        if re.search(pattern, cmd, re.IGNORECASE):
-            return f"⚠️ 危险命令被拦截: {pattern}"
-    return None
+    def guard_command(self, cmd: str) -> str | None:
+        for pattern in DENY_PATTERNS:
+            if re.search(pattern, cmd, re.IGNORECASE):
+                return f"⚠️ 危险命令被拦截: {pattern}"
+        return None
+    

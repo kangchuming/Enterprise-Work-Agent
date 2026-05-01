@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 # 将项目根目录添加到 Python 路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -10,40 +11,53 @@ from agent.history import History   # ← 新增
 import re
 from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
-from tools.file_manager import create_file
+from tools.file_manager import create_file, read_file
 from agent.identity import get_identity_prompt
-from agent.guard import _resolve_path, guard_command
+from agent.guard import Guard
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class OpenAICompatibleClient:
-    """
-    一个用于调用任何兼容OpenAI接口的LLM服务的客户端。
-    """
-    def __init__(self, model: str, api_key: str, base_url: str):
-        self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-
-    def generate(self, system_prompt: str) -> str:
-        """调用LLM API来生成回应。"""
-        print("正在调用大语言模型...")
-        try:
-            messages = [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': '创建一个名字为aus的文档'}
-            ]
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                stream=False
-            )
-            answer = response.choices[0].message.content
-            print("大语言模型响应成功。")
-            return answer
-        except Exception as e:
-            print(f"调用LLM API时发生错误: {e}")
-            return "错误:调用语言模型服务时出错。"
+TOOLS = [
+    {                                   # ← 一个工具
+        "type": "function",             # ← 固定值，只有 "function" 一种
+        "function": {                    # ← 工具定义
+            "name": "create_file",             # ← 唯一标识，字母/数字/下划线/短横线，最长64字符
+            "description": "创建一个新文件，并写入内容，如果文件已存在，则更新该文件内容",   # ← LLM 靠这个判断什么时候调用
+            "parameters": {              # ← JSON Schema 格式，标准参数定义
+                "type": "object",        # ← 固定值，参数必须是对象
+                "properties": {          # ← 每个参数的详细定义
+                    "file_str": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "完整文件路径（包含文件名）",   # LLM 靠这个理解参数含义
+                    },
+                    "content": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "文件内容"
+                    }
+                },
+                "required": ["file_str", "content"]  # 哪些参数必须传
+            }
+        }
+    }, 
+    {                                   # ← 一个工具
+        "type": "function",             # ← 固定值，只有 "function" 一种
+        "function": {                    # ← 工具定义
+            "name": "read_file",             # ← 唯一标识，字母/数字/下划线/短横线，最长64字符
+            "description": "读取文件内容",   # ← LLM 靠这个判断什么时候调用
+            "parameters": {              # ← JSON Schema 格式，标准参数定义
+                "type": "object",        # ← 固定值，参数必须是对象
+                "properties": {          # ← 每个参数的详细定义
+                    "file_str": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "完整文件路径（包含文件名）",   # LLM 靠这个理解参数含义
+                    },
+                },
+                "required": ["file_str"]  # 哪些参数必须传
+            }
+        }
+    }
+]
 
 class Agent:
     """封装配置和客户端的 Agent 类"""
@@ -70,7 +84,7 @@ class Agent:
         # 构建完整的 system_prompt
         self.system_prompt = get_create_loop_prompt(
             identity=identity,
-            input="请创建 test.txt 文件，内容是 Hello",
+            input="input_str",
             history=""
         )
 
@@ -86,63 +100,98 @@ class Agent:
             print(f"\n{'='*40}")
 
             # 1. 调 LLM
-            response = self._call_llm()
-            print(f"响应: {response}")
-            # 2. 解析 Thought 和 Action
-            max_retries = 3
-            for retry in range(max_retries):
-                try:
-                    action, thought = self._parse_response(response)
-                    if not action:
-                        raise ValueError("Action 为空")
-                    break
-                except Exception as e:
-                    # 解析失败 → 自纠错：把报错信息塞回 messages
-                    error_msg = f"格式错误：{e}。请严格按照 Thought: ... Action: ... 格式输出，不要输出其他内容。"
-                    print(f"⚠️ 解析失败 (重试 {retry + 1}/{max_retries}): {e}")
-                    
-                    # 把 LLM 的错误输出和报错信息都塞回 messages
-                    self.history.add_assistant(response)
-                    self.history.add_user(error_msg)
-                    response = self._call_llm()
-                    print(f"response: {response}")
-            else:
-                print(f"解析最大次数使用完: {max_retries}")
-                continue
-            print(f"action: {action}, thought: {thought}")
+            message = self._call_llm()
+            print(f"响应: {message}")
 
-            # 3. 执行 Action
-            observation = self._execute_action(thought)
-            print(f"Observation: {observation}")
-            if "成功" in observation:
-                print(f"Observation: {observation}")
-                print(f"✅ 检测到成功，自动结束")
+            # 2. 把 assistant 的回复存入历史
+            self.history.messages.append(message.to_dict())
+
+            # 3. 判断：是调工具还是直接回复？
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args =  json.loads(tool_call.function.arguments)
+                    tool_call_id = tool_call.id
+                    
+                    #执行工具
+                    observation = self._execute_tool(tool_name, tool_args)
+
+                    self.history.messages.append({
+                        'role': 'tool',
+                        'name': tool_name,
+                        'tool_call_id': tool_call_id,
+                        'content': observation
+                    })
+
+                    #记录日志
+                    self.step_logs.append({
+                        "step": step + 1,
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "observation": observation
+                    })
+
+                    #检查是否完成
+                    if "成功" in observation:
+                        print(f"检测到成功")
+            
+            else:
+                # 没有 tool_calls → LLM 直接回复，任务完成
+                content = message.content or ""
+                print(f"💬 LLM 回复: {content}")
                 self.step_logs.append({
                     "step": step + 1,
-                    "thought": thought,
-                    "action": "Finish[任务完成]",
+                    "tool": "finish",
+                    "args": {},
                     "observation": observation
                 })
+                print(f"\n✅ 任务完成！")
                 return self._build_result()
         
-            # 4. 记录日志
-            self.step_logs.append({
-                "step": step + 1,
-                "action": action,
-                "thought": thought,
-                "observation": observation
-            })
-            # 5. 结果塞回 messagess
-            self.history.add_assistant(f"Thought: {thought}\nAction: {action}")   # ←
-            self.history.add_user(f"Observation: {observation}")     
-            # 6. 检查是否完成
-            # response = self.client.generate(system_prompt= system_prompt)
-            # print(f"响应: {response}")
-            if action.startswith('Finish'):
-                print(f"\n任务完成！")
-                return self._build_result()
-        print(f"\n已达到最大重试次数")
+        #达到最大步数
+        print(f"\n已达到最大步数")
         return self._build_result()
+
+    def _execute_tool(self, tool_name, tool_args):
+        """执行工具不用正则"""
+
+        #判断tool_name类型
+        if tool_name == 'create_file':
+            file_str = tool_args.get("file_str", "")
+            content = tool_args.get("content", "")
+
+            # Guard安全检查
+            try:
+                data_dir = Path(project_root) / "data"
+                guard = Guard()
+                guard._resolve_path(file_str, data_dir)
+            except PermissionError as e:
+                return f"拒绝操作: {e}"
+            
+            try:
+                create_file(file_str, content)
+                return f"成功创建文件: {file_str}"
+            except Exception as e:
+                return f"错误: {e}"
+
+        elif tool_name == 'read_file':
+            file_str = tool_args.get("file_str", "")
+
+            # Guard安全检查
+            try:
+                data_dir = Path(project_root) / "data"
+                guard = Guard()
+                guard._resolve_path(file_str, data_dir)
+            except PermissionError as e:
+                return f"拒绝操作: {e}"
+            
+            try:
+                content = read_file(file_str)
+                return f"文件内容: {content}"
+            except Exception as e:
+                return f"错误: {e}"
+        else:
+            return f"未知工具 {tool_name}"
 
     def _call_llm(self) -> str:
         """调用 LLM"""
@@ -151,56 +200,20 @@ class Agent:
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=self.history.build(self.system_prompt),
+                messages=msgs,
+                tools=TOOLS,
+                tool_choice="auto",
                 stream=False
             )
-            answer = response.choices[0].message.content
-            return answer
+            message = response.choices[0].message
+            return message
         except Exception as e:
             return f"错误: {e}"
-
-    def _parse_response(self, response: str) -> tuple:
-        """解析 Thought 和 Action"""
-        thought_match = re.search(r"Thought:\s*(.*?)(?=Action:|$)", response, re.DOTALL)
-        action_match = re.search(r"Action:\s*(.*)", response, re.DOTALL)
-        
-        thought = thought_match.group(1).strip() if thought_match else ""
-        action = action_match.group(1).strip() if action_match else "Finish[未能解析]"
-        
-        return thought, action
-    
-    def _execute_action(self, action: str) -> str:
-        """执行工具（目前只有 create_file）"""
-        
-        if action.startswith('create_file'):
-            match = re.match(r'create_file\[(.*?),\s*(.*)$$', action, re.DOTALL)
-            if match:
-                file_str = match.group(1).strip()
-                content = match.group(2).strip()
-
-                # ✅ Guard: 路径安全检查
-                try:
-                    data_dir = Path(project_root) / "kcm"
-                    _resolve_path(file_str, data_dir)
-                except PermissionError as e:
-                    return f"拒绝操作: {e}"
-
-                try:
-                    create_file(file_str, content)
-                    return "成功操作 create_file "
-                except Exception as e:
-                    return f"错误: {e}"
-            
-        elif action.startswith("finish"):
-            return "任务完成"
-        else:
-            return f"位置操作：{action}"
-
     
     def _build_result(self) -> dict:
         """构建最终结果"""
         return {
-            "success": any(log["action"].startswith("Finish") for log in self.step_logs),
+            "success": any(log.get('tool') == "finish" for log in self.step_logs),
             "steps": len(self.step_logs),
             "logs": self.step_logs
         }

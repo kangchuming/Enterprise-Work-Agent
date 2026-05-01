@@ -26,3 +26,25 @@ def create_file(filePath, content):
     except FileExistsError as e:
         print(f"写入失败: {e}")
         return False
+
+def read_file(filePath):
+    """
+    读取文件
+    
+    Args:
+        file_path: 完整文件路径（包含文件名），如 ~/Documents/courage.txt
+    """
+    file_path = os.path.expanduser(filePath)
+
+    #读取文件
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            print("读取成功")
+            return content
+    except FileNotFoundError as e:
+        print(f"文件不存在: {file_path} {e}")
+        return f"文件不存在: {file_path}"
+    except PermissionError as e:
+        print(f"文件权限不允许读取 {e}")
+        return f"文件权限不允许读取: {file_path}"

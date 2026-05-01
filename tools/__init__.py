@@ -1,7 +1,8 @@
 """Agent tools module."""
 
-from tools.file_manager import create_file
+from tools.file_manager import create_file, read_file
 
 __all__ = [
-    "file_manager"
+    "create_file",
+    "read_file"
 ]
