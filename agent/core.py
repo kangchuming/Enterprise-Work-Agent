@@ -83,15 +83,8 @@ class Agent:
         
         # 构建完整的 system_prompt
         self.system_prompt = get_create_loop_prompt(
-            identity=identity,
-            input="input_str",
-            history=""
+            identity=identity
         )
-
-        # self.messages = [
-        #     {'role': 'system', 'content': system_prompt},
-        #     {'role': 'user', 'content': input_str}
-        # ]
         self.history.add_user(input_str) 
 
         for step in range(self.max_step):

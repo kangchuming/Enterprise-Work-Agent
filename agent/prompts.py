@@ -15,5 +15,5 @@ CREATE_LOOP_PROMPT = """
 现在，请解决以下问题：
 """
 
-def get_create_loop_prompt(identity: str, **kwargs) -> str:
+def get_create_loop_prompt(identity: str) -> str:
     return CREATE_LOOP_PROMPT.format(identity=identity)
