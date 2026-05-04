@@ -11,7 +11,7 @@ from agent.history import History   # ← 新增
 import re
 from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
-from tools.file_manager import create_file, read_file
+from tools.file_manager import create_file, read_file, search_file
 from agent.identity import get_identity_prompt
 from agent.guard import Guard
 from dotenv import load_dotenv
@@ -54,6 +54,34 @@ TOOLS = [
                     },
                 },
                 "required": ["file_str"]  # 哪些参数必须传
+            }
+        }
+    }, 
+    {                                   # ← 一个工具
+        "type": "function",             # ← 固定值，只有 "function" 一种
+        "function": {                    # ← 工具定义
+            "name": "search_file",             # ← 唯一标识，字母/数字/下划线/短横线，最长64字符
+            "description": "搜索目录下的特定文件，可配置匹配参数",   # ← LLM 靠这个判断什么时候调用
+            "parameters": {              # ← JSON Schema 格式，标准参数定义
+                "type": "object",        # ← 固定值，参数必须是对象
+                "properties": {          # ← 每个参数的详细定义
+                    "directory": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "完整文件路径（不包含文件名）",   # LLM 靠这个理解参数含义
+                    },
+                    "pattern": {
+                    "type": "string",
+                    "description": (
+                        "文件匹配模式，支持通配符：\n"
+                        "- '*' 匹配任意字符（不含路径分隔符），如 '*.txt' 匹配所有 .txt 文件\n"
+                        "- '?' 匹配单个字符，如 'file?.txt' 匹配 file1.txt、fileA.txt\n"
+                        "- '[abc]' 匹配括号内任一字符，如 'file[12].txt' 匹配 file1.txt 和 file2.txt\n"
+                        "- '[!abc]' 匹配不在括号内的字符\n"
+                        "常用示例：'*.py' 搜索所有 Python 文件，'test_*.txt' 搜索 test_ 开头的 txt 文件，'*.{txt,md}' 搜索 txt 和 md 文件"
+                    )
+                }
+                },
+                "required": ["directory", "pattern"]  # 哪些参数必须传
             }
         }
     }
@@ -181,6 +209,23 @@ class Agent:
             try:
                 content = read_file(file_str)
                 return f"文件内容: {content}"
+            except Exception as e:
+                return f"错误: {e}"
+        elif tool_name == 'search_file':
+            directory = tool_args.get("directory", "")
+            pattern = tool_args.get("pattern", "")
+
+            # Guard安全检查
+            try:
+                data_dir = Path(project_root) / "data"
+                guard = Guard()
+                guard._resolve_path(directory, data_dir)
+            except PermissionError as e:
+                return f"拒绝操作: {e}"
+            
+            try:
+                result = search_file(directory, pattern)
+                return f"文件检索结果: {result}"
             except Exception as e:
                 return f"错误: {e}"
         else:

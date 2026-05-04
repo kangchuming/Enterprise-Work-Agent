@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 def create_file(filePath, content):
     """
@@ -48,3 +49,30 @@ def read_file(filePath):
     except PermissionError as e:
         print(f"文件权限不允许读取 {e}")
         return f"文件权限不允许读取: {file_path}"
+
+# ```
+# 任务：给原项目加一个 search_file 工具
+
+# 参数：directory (string), pattern (string)
+# 功能：在目录下按 pattern 搜索文件
+
+# 改动清单（不改 prompt）：
+# □ TOOLS 加一项
+# □ _execute_tool 加一个 elif
+# □ 确认 prompt 不需要改（理由：TOOLS 已告诉 LLM）
+
+# 跑通判断：输入"在 /data 目录搜索所有 .txt 文件"，LLM 调 search_file
+def search_file(directory: str, pattern: str):
+    """
+    在目录下按 pattern 搜索文件
+    
+    Args:
+        directory: 完整文件路径（不包含文件名），如 ~/Documents
+        pattern: 匹配参数
+    """
+    dir_path = Path(directory).expanduser().resolve()
+    result = []
+
+    for f in dir_path.rglob(pattern):
+        result.append(str(f))
+    return result
