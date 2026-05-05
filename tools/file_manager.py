@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 
 def create_file(filePath, content):
@@ -28,7 +29,7 @@ def create_file(filePath, content):
         print(f"写入失败: {e}")
         return False
 
-def read_file(filePath):
+def read_file(filePath: str, limit:  int = None):
     """
     读取文件
     
@@ -40,9 +41,11 @@ def read_file(filePath):
     #读取文件
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            print("读取成功")
-            return content
+            lines = f.readlines()
+
+            if limit and len(lines) > limit:
+                return "".join(lines[:limit]) + f"\n... (还有 {len(lines) - limit} 行未显示)"
+            return "".join(lines)
     except FileNotFoundError as e:
         print(f"文件不存在: {file_path} {e}")
         return f"文件不存在: {file_path}"
@@ -76,3 +79,46 @@ def search_file(directory: str, pattern: str):
     for f in dir_path.rglob(pattern):
         result.append(str(f))
     return result
+
+# 修改文档内容
+def edit_file(filePath: str, old_text: str, new_text: str) -> str:
+    '''精确替换文件中的一段文本'''
+    # 拿到目录
+    file_path = Path(filePath).expanduser().resolve()
+
+    #拿到原文本
+    try:
+        content = read_file(file_path)
+        print("读取成功, {content}")
+    except Exception as e:
+        print("读取失败, {e}")
+    
+    newContent = content.replace(old_text, new_text, 1)
+
+    #写入文档
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(newContent)
+        print("写入成功")
+        return(f"文本替换成功，{newContent}")
+    except FileNotFoundError as e:
+        print(f"文件不存在: {file_path} {e}")
+        return f"文件不存在: {file_path}"
+    except PermissionError as e:
+        print(f"文件权限不允许读取 {e}")
+        return f"文件权限不允许读取: {file_path}"
+
+def run_bash(command: str, timeout: int):
+    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
+
+    if any(d in command for d in dangerous):
+        return f"危险命令{command}"
+    
+    try:
+        r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+        out = (r.stderr + r.stdout).strip()
+        
+        return out[:5000] if out else "not out"
+    except subprocess.TimeoutExpired:
+        return f"命令超时（{timeout}秒）: {command}"
+

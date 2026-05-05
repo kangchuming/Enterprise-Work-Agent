@@ -11,7 +11,7 @@ from agent.history import History   # ← 新增
 import re
 from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
-from tools.file_manager import create_file, read_file, search_file
+from tools.file_manager import create_file, read_file, search_file, edit_file, run_bash
 from agent.identity import get_identity_prompt
 from agent.guard import Guard
 from dotenv import load_dotenv
@@ -52,6 +52,11 @@ TOOLS = [
                         "type": "string",           # 类型：string / number / integer / boolean / array / object
                         "description": "完整文件路径（包含文件名）",   # LLM 靠这个理解参数含义
                     },
+                    "limit": {
+
+                        "type": "integer",
+                        "description": "读取的最大行数，如果未填写，则读取全部内容"
+                    }
                 },
                 "required": ["file_str"]  # 哪些参数必须传
             }
@@ -82,6 +87,52 @@ TOOLS = [
                 }
                 },
                 "required": ["directory", "pattern"]  # 哪些参数必须传
+            }
+        }
+    },
+    {                                   # ← 一个工具
+        "type": "function",             # ← 固定值，只有 "function" 一种
+        "function": {                    # ← 工具定义
+            "name": "edit_file",             # ← 唯一标识，字母/数字/下划线/短横线，最长64字符
+            "description": "使用新内容，替换文件文档中的老内容",   # ← LLM 靠这个判断什么时候调用
+            "parameters": {              # ← JSON Schema 格式，标准参数定义
+                "type": "object",        # ← 固定值，参数必须是对象
+                "properties": {          # ← 每个参数的详细定义
+                    "file_str": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "完整文件路径，包含文件名",   # LLM 靠这个理解参数含义
+                    },
+                    "old_text": {
+                    "type": "string",
+                    "description": "老文本内容"
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "新文本内容，用于替换老文本内容"
+                }
+                },
+                "required": ["file_str", "old_text", "new_text"]  # 哪些参数必须传
+            }
+        }
+    },
+    {                                   # ← 一个工具
+        "type": "function",             # ← 固定值，只有 "function" 一种
+        "function": {                    # ← 工具定义
+            "name": "run_bash",             # ← 唯一标识，字母/数字/下划线/短横线，最长64字符
+            "description": "执行命令行命令",   # ← LLM 靠这个判断什么时候调用
+            "parameters": {              # ← JSON Schema 格式，标准参数定义
+                "type": "object",        # ← 固定值，参数必须是对象
+                "properties": {          # ← 每个参数的详细定义
+                    "command": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "命令行命令，不包含下列危险命令：rm -rf /, sudo, shutdown, reboot, > /dev/",   # LLM 靠这个理解参数含义
+                    },
+                    "timeout": {
+                        "type": "integer",           # 类型：string / number / integer / boolean / array / object
+                        "description": "超时时间，单位s",   # LLM 靠这个理解参数含义
+                    },
+                },
+                "required": ["command", "timeout"]  # 哪些参数必须传
             }
         }
     }
@@ -197,7 +248,7 @@ class Agent:
 
         elif tool_name == 'read_file':
             file_str = tool_args.get("file_str", "")
-
+            limit = tool_args.get("limit", "")
             # Guard安全检查
             try:
                 data_dir = Path(project_root) / "data"
@@ -207,7 +258,7 @@ class Agent:
                 return f"拒绝操作: {e}"
             
             try:
-                content = read_file(file_str)
+                content = read_file(file_str, limit)
                 return f"文件内容: {content}"
             except Exception as e:
                 return f"错误: {e}"
@@ -228,8 +279,41 @@ class Agent:
                 return f"文件检索结果: {result}"
             except Exception as e:
                 return f"错误: {e}"
-        else:
-            return f"未知工具 {tool_name}"
+        elif tool_name == 'edit_file':
+            file_str = tool_args.get("file_str", "")
+            old_text = tool_args.get("old_text", "")
+            new_text = tool_args.get("new_text", "")
+
+            # Guard安全检查
+            try:
+                data_dir = Path(project_root) / "data"
+                guard = Guard()
+                guard._resolve_path(file_str, data_dir)
+            except PermissionError as e:
+                return f"拒绝操作: {e}"
+            
+            try:
+                content = edit_file(file_str, old_text, new_text)
+                return f"内容替换成功: {content}"
+            except Exception as e:
+                return f"错误: {e}"
+        elif tool_name == 'run_bash':
+            command = tool_args.get("command", "")
+            timeout = tool_args.get("timeout", "")
+            # # Guard安全命令检查
+            guard = Guard()
+            block_reason = guard.guard_command(command)
+            
+            if block_reason:
+                return block_reason
+                
+            try:
+                res = run_bash(command, timeout)
+                return f"命令执行成功: {res}"
+            except Exception as e:
+                return f"错误: {e}"
+
+
 
     def _call_llm(self) -> str:
         """调用 LLM"""
