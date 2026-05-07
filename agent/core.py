@@ -14,6 +14,7 @@ from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
 from tools.file_manager import create_file, read_file, search_file, edit_file, run_bash, tavily_search
 from agent.identity import get_identity_prompt
 from agent.guard import Guard
+from agent.log_config import setup_logging, get_audit_logger
 from dotenv import load_dotenv
 from tavily import TavilyClient
 from e2b_code_interpreter import Sandbox
@@ -210,6 +211,7 @@ class Agent:
     """封装配置和客户端的 Agent 类"""
     
     def __init__(self, max_step: int = 5, max_messages: int = 50, max_token: int = 4000):
+        setup_logging(os.getenv("OS_ENV", "dev"))
         # 自动从 .env 加载配置
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("OPENAI_BASE_URL")
@@ -221,6 +223,7 @@ class Agent:
         self.step_logs = []
         self.tavilyClient = TavilyClient(os.getenv("TAVILY_API_KEY"))
         self.sbx = Sandbox.create(timeout=600)
+        self.log = get_audit_logger(agent="Agent", model=self.model)
 
 
     def run(self, input_str: str):
@@ -238,13 +241,10 @@ class Agent:
         self.history.add_user(input_str) 
 
         for step in range(self.max_step):
-            print(f"\n{'='*40}")
-            print(f"Step {step + 1}/{self.max_step}")
-            print(f"\n{'='*40}")
-
+            self.log.info("执行的步数次序",  current_step=step+1, max_step = self.max_step)
             # 1. 调 LLM
             message = self._call_llm()
-            print(f"响应: {message}")
+            self.log.info("llm返回的消息", message=message)
 
             # 2. 把 assistant 的回复存入历史
             self.history.messages.append(message.to_dict())
@@ -276,23 +276,23 @@ class Agent:
 
                     #检查是否完成
                     if "成功" in observation:
-                        print(f"检测到成功")
+                        self.log.info("执行成功",observation = observation)
             
             else:
                 # 没有 tool_calls → LLM 直接回复，任务完成
                 content = message.content or ""
-                print(f"💬 LLM 回复: {content}")
+                self.log.info("💬 LLM 回复", content = content)
                 self.step_logs.append({
                     "step": step + 1,
                     "tool": "finish",
                     "args": {},
                     "observation": observation
                 })
-                print(f"\n✅ 任务完成！")
+                self.log.info("task_finish", step_logs=self.step_logs[-1])
                 return self._build_result()
         
         #达到最大步数
-        print(f"\n已达到最大步数")
+        self.log.error("max_steps_reached", step = step)
         return self._build_result()
 
     def _execute_tool(self, tool_name, tool_args):
@@ -309,12 +309,15 @@ class Agent:
                 guard = Guard()
                 guard._resolve_path(file_str, data_dir)
             except PermissionError as e:
+                self.log.error("安全检查出错", error=e)
                 return f"拒绝操作: {e}"
             
             try:
                 create_file(file_str, content)
+                self.log.info("成功创建文件", file_str=file_str)
                 return f"成功创建文件: {file_str}"
             except Exception as e:
+                self.log.error("创建文件出错", error = e)
                 return f"错误: {e}"
 
         elif tool_name == 'read_file':
@@ -326,12 +329,15 @@ class Agent:
                 guard = Guard()
                 guard._resolve_path(file_str, data_dir)
             except PermissionError as e:
+                self.log.error("安全检查出错", error=e)
                 return f"拒绝操作: {e}"
             
             try:
                 content = read_file(file_str, limit)
+                self.log.info("成功读取文件", content=content)
                 return f"文件内容: {content}"
             except Exception as e:
+                self.log.error("读取文件出错", error = e)
                 return f"错误: {e}"
         elif tool_name == 'search_file':
             directory = tool_args.get("directory", "")
@@ -343,12 +349,15 @@ class Agent:
                 guard = Guard()
                 guard._resolve_path(directory, data_dir)
             except PermissionError as e:
+                self.log.error("拒绝操作", error=e)
                 return f"拒绝操作: {e}"
             
             try:
                 result = search_file(directory, pattern)
+                self.log.info("成功检索文件", result=result)
                 return f"文件检索结果: {result}"
             except Exception as e:
+                self.log.error("文件检索失败", error=e)
                 return f"错误: {e}"
         elif tool_name == 'edit_file':
             file_str = tool_args.get("file_str", "")
@@ -361,12 +370,15 @@ class Agent:
                 guard = Guard()
                 guard._resolve_path(file_str, data_dir)
             except PermissionError as e:
+                self.log.error("编辑文件安全检查出错", error = e)
                 return f"拒绝操作: {e}"
             
             try:
                 content = edit_file(file_str, old_text, new_text)
+                self.log.info("成功编辑文件", content=content)
                 return f"内容替换成功: {content}"
             except Exception as e:
+                self.log.error("编辑文件出错", error = e)
                 return f"错误: {e}"
         elif tool_name == 'run_bash':
             command = tool_args.get("command", "")
@@ -380,8 +392,10 @@ class Agent:
                 
             try:
                 res = run_bash(command, timeout)
+                self.log.info("成功执行命令", res=res)
                 return f"命令执行成功: {res}"
             except Exception as e:
+                self.log.error("执行命令出错", error = e)
                 return f"错误: {e}"
         elif tool_name == 'tavily_search':
             query = tool_args.get("query", "")
@@ -389,21 +403,26 @@ class Agent:
                 
             try:
                 res = tavily_search(query, timeout, self.tavilyClient)
+                self.log.info("成功搜索网络", res=res)
                 return f"搜索成功，结果为: {res}"
             except Exception as e:
+                self.log.error("搜索网络出错", error = e)
                 return f"错误: {e}"
         elif tool_name == 'run_python':
             code = tool_args.get("code", "")
             res = self.sbx.run_code(code)
 
             if res.error:
+                self.log.error("执行python失败", res=res.error)
                 return f"执行出错： {res.error}"
             
             stdout_str = "".join(res.logs.stdout)
             stderr_str = "".join(res.logs.stderr)
 
             if stderr_str:
+                self.log.error("执行python出错", res=stderr_str)
                 return f"{stdout_str}出错: {stderr_str}"
+            self.log.info("成功执行python", res=stdout_str)
             return f"成功{stdout_str}"
             
         elif tool_name == 'e2b_file':
@@ -414,22 +433,27 @@ class Agent:
             try:
                 if action == 'read':
                     res = self.sbx.files.read(path)
+                    self.log.info("成功执行e2b读取操作", res=res)
                     return f"读取内容为: {res}"
                 elif action == 'write':
                     self.sbx.files.write(path, content)
+                    self.log.info("成功执行e2b写入操作", action=action)
                     return f"写入成功"
                 elif action == 'list':
                     file_list = self.sbx.files.list()
+                    self.log.info("成功执行e2b查看列表操作", res=file_list)
                     return f"sandbox list清单为：{file_list}"
                 else:
+                    self.log.error("e2b操作不合法", action=action)
                     return "操作不合法"
             except Exception as e:
+                self.log.error("执行e2b操作失败", error=e)
                 return f"错误: {e}"
 
     def _call_llm(self) -> str:
         """调用 LLM"""
         msgs = self.history.build(self.system_prompt)
-        print(f"[DEBUG] 发送 {len(msgs)} 条消息，约 {sum(len(str(m.get('content',''))) for m in msgs)} 字符")
+        self.log.info("DEBUG消息统计",  msg_count =len(msgs), str_len = sum(len(str(m.get('content',''))) for m in msgs))
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -439,13 +463,16 @@ class Agent:
                 stream=False
             )
             message = response.choices[0].message
+            self.log.info("成功llm调用", message=message)
             return message
         except Exception as e:
+            self.log.error("执行llm操作失败", error=e)
             return f"错误: {e}"
     
     def _build_result(self) -> dict:
         """构建最终结果"""
         self.sbx.kill()
+        self.log.info("成功构建llm调用结果", step_logs=self.step_logs)
         return {
             "success": any(log.get('tool') == "finish" for log in self.step_logs),
             "steps": len(self.step_logs),
