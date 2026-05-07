@@ -11,12 +11,16 @@ from agent.history import History   # ← 新增
 import re
 from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
-from tools.file_manager import create_file, read_file, search_file, edit_file, run_bash
+from tools.file_manager import create_file, read_file, search_file, edit_file, run_bash, tavily_search
 from agent.identity import get_identity_prompt
 from agent.guard import Guard
 from dotenv import load_dotenv
+from tavily import TavilyClient
+from e2b_code_interpreter import Sandbox
 
 load_dotenv()
+
+
 
 TOOLS = [
     {                                   # ← 一个工具
@@ -135,6 +139,70 @@ TOOLS = [
                 "required": ["command", "timeout"]  # 哪些参数必须传
             }
         }
+    },
+    {                                   # ← 一个工具
+        "type": "function",             # ← 固定值，只有 "function" 一种
+        "function": {                    # ← 工具定义
+            "name": "tavily_search",             # ← 唯一标识，字母/数字/下划线/短横线，最长64字符
+            "description": "执行网络搜索，tavili",   # ← LLM 靠这个判断什么时候调用
+            "parameters": {              # ← JSON Schema 格式，标准参数定义
+                "type": "object",        # ← 固定值，参数必须是对象
+                "properties": {          # ← 每个参数的详细定义
+                    "query": {
+                        "type": "string",           # 类型：string / number / integer / boolean / array / object
+                        "description": "搜索的内容",   # LLM 靠这个理解参数含义
+                    },
+                    "timeout": {
+                        "type": "integer",           # 类型：string / number / integer / boolean / array / object
+                        "description": "超时时间，单位s",   # LLM 靠这个理解参数含义
+                    },
+                },
+                "required": ["query", "timeout"]  # 哪些参数必须传
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": "在云端沙箱中执行 Python 代码，返回输出",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "要执行的 Python 代码"
+                    }
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "e2b_file",
+            "description": "操作沙箱中的文件：读取、写入、列出目录",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "write", "list"],
+                        "description": "操作类型"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "文件路径"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "写入的内容（action=write 时需要）"
+                    }
+                },
+                "required": ["action", "path"]
+            }
+        }
     }
 ]
 
@@ -151,6 +219,9 @@ class Agent:
         self.history = History(max_messages=max_messages, max_token=max_token)
         self.system_prompt = ""
         self.step_logs = []
+        self.tavilyClient = TavilyClient(os.getenv("TAVILY_API_KEY"))
+        self.sbx = Sandbox.create(timeout=600)
+
 
     def run(self, input_str: str):
         """运行 Agent"""
@@ -312,8 +383,48 @@ class Agent:
                 return f"命令执行成功: {res}"
             except Exception as e:
                 return f"错误: {e}"
+        elif tool_name == 'tavily_search':
+            query = tool_args.get("query", "")
+            timeout = tool_args.get("timeout", 30)
+                
+            try:
+                res = tavily_search(query, timeout, self.tavilyClient)
+                return f"搜索成功，结果为: {res}"
+            except Exception as e:
+                return f"错误: {e}"
+        elif tool_name == 'run_python':
+            code = tool_args.get("code", "")
+            res = self.sbx.run_code(code)
 
+            if res.error:
+                return f"执行出错： {res.error}"
+            
+            stdout_str = "".join(res.logs.stdout)
+            stderr_str = "".join(res.logs.stderr)
 
+            if stderr_str:
+                return f"{stdout_str}出错: {stderr_str}"
+            return f"成功{stdout_str}"
+            
+        elif tool_name == 'e2b_file':
+            action = tool_args.get("action", "")
+            path = tool_args.get("path", "")
+            content = tool_args.get("content", "")
+
+            try:
+                if action == 'read':
+                    res = self.sbx.files.read(path)
+                    return f"读取内容为: {res}"
+                elif action == 'write':
+                    self.sbx.files.write(path, content)
+                    return f"写入成功"
+                elif action == 'list':
+                    file_list = self.sbx.files.list()
+                    return f"sandbox list清单为：{file_list}"
+                else:
+                    return "操作不合法"
+            except Exception as e:
+                return f"错误: {e}"
 
     def _call_llm(self) -> str:
         """调用 LLM"""
@@ -334,6 +445,7 @@ class Agent:
     
     def _build_result(self) -> dict:
         """构建最终结果"""
+        self.sbx.kill()
         return {
             "success": any(log.get('tool') == "finish" for log in self.step_logs),
             "steps": len(self.step_logs),

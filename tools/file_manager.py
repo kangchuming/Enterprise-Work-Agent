@@ -122,3 +122,26 @@ def run_bash(command: str, timeout: int):
     except subprocess.TimeoutExpired:
         return f"命令超时（{timeout}秒）: {command}"
 
+def tavily_search(query: str, timeout: int, tavilyClient):
+    try:
+        res = tavilyClient.search(query=query, max_results=3, timeout = timeout, include_raw_content="markdown")
+        results = res.get('results', '')
+        maxCount = 500
+
+        if not results:
+            return "没有搜索到结果"
+
+        trip = []
+        for i, obj in enumerate(results, 1):
+            raw_text = obj.get("raw_content", '')
+            title = obj.get("title", "")
+            text = raw_text
+            
+            if len(raw_text) > maxCount:
+                text = raw_text[:maxCount] + "...\n"
+            trip.append(f"{i} {title} \n {text}")
+        return f'搜索结果：{"\n".join(trip)}'
+    except Exception as e:
+        print(e)
+        return f"搜索报错：{e}"
+

@@ -7,4 +7,4 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if __name__ == "__main__":
     agent = Agent(max_messages=50, max_token=8000)
-    agent.run('show me the first 5 lines of text.txt using a shell command,在1s内完成')
+    agent.run('在Sandbox环境下，新建一个a.md 帮我写入文字：夜深忽梦少年事，梦啼妆泪红阑干。醒来风止人亦远，旧我沉入旧时山。')
