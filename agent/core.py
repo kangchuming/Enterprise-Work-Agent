@@ -8,6 +8,8 @@ sys.path.insert(0, project_root)
 
 from openai import OpenAI
 from agent.history import History   # ← 新增
+import casbin
+from dotenv import load_dotenv
 import re
 from pathlib import Path
 from agent.prompts import CREATE_LOOP_PROMPT, get_create_loop_prompt
@@ -15,7 +17,6 @@ from tools.file_manager import create_file, read_file, search_file, edit_file, r
 from agent.identity import get_identity_prompt
 from agent.guard import Guard
 from agent.log_config import setup_logging, get_audit_logger
-from dotenv import load_dotenv
 from tavily import TavilyClient
 from e2b_code_interpreter import Sandbox
 
@@ -207,6 +208,16 @@ TOOLS = [
     }
 ]
 
+TOOL_ACTION_MAP = {
+    "create_file": "create",
+    "read_file": "read",
+    "search_file": "search",
+    "edit_file": "update",
+    "run_bash": "run_bash",
+    "tavily_search": "online_search",
+    "run_python": "run_python"
+}
+
 class Agent:
     """封装配置和客户端的 Agent 类"""
     
@@ -224,9 +235,10 @@ class Agent:
         self.tavilyClient = TavilyClient(os.getenv("TAVILY_API_KEY"))
         self.sbx = Sandbox.create(timeout=600)
         self.log = get_audit_logger(agent="Agent", model=self.model)
+        self.enforcer = casbin.Enforcer('config/model.conf', 'config/policy.csv')
 
 
-    def run(self, input_str: str):
+    def run(self, input_str: str, user: str = 'anonymous', resource: str = 'data'):
         """运行 Agent"""
         # 获取身份提示词（填充 workspace_path 等变量）
         identity = get_identity_prompt(
@@ -255,6 +267,27 @@ class Agent:
                     tool_name = tool_call.function.name
                     tool_args =  json.loads(tool_call.function.arguments)
                     tool_call_id = tool_call.id
+                    action = TOOL_ACTION_MAP.get(tool_name, 'unknown')
+
+                    if not self.enforcer.enforce(user, resource, action):
+                        self.log.warn("权限不足", user=user, resource=resource, action=action)
+                        observation = f"权限不足：{user} 无权对 {resource} 执行 {action}"
+
+                        self.history.messages.append({
+                        'role': 'tool',
+                        'name': tool_name,
+                        'tool_call_id': tool_call_id,
+                        'content': observation
+                        })
+
+                        #记录日志
+                        self.step_logs.append({
+                            "step": step + 1,
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "observation": observation
+                        })
+                        continue
                     
                     #执行工具
                     observation = self._execute_tool(tool_name, tool_args)

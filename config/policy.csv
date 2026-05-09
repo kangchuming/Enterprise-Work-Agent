@@ -1,0 +1,15 @@
+p, admin, data, read
+p, admin, data, write
+p, admin, data, create
+p, admin, data, delete
+p, admin, data, run_bash
+p, admin, data, run_python
+p, admin, data, update
+p, admin, data, search
+p, admin, data, online_search
+p, user, data, read
+p, user, data, online_search
+p, user, data, search
+
+g, kcm, admin
+g, bl, user
