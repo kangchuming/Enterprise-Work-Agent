@@ -1,5 +1,8 @@
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, START, END
+# from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+import sqlite3
 import chromadb
 import sys
 import os
@@ -35,7 +38,34 @@ def retrieve_node(state: RAGState):
 
     results = index.as_retriever(similarity_top_k = 10).retrieve(state["question"])
 
-    return {"results": results}
+    clearn_result = [
+        {"text": r.text, "score": float(r.score)} for r in results
+    ]
+
+    return {"results": clearn_result}
+
+# ======== 0.5 工具函数 ========
+def _get_text(item):
+    """从结果项提取文本，兼容 dict / 正常 NodeWithScore / 反序列化损坏的对象"""
+    if isinstance(item, dict):
+        return item.get("text", "")
+    if isinstance(item, str):
+        return item
+    
+    # 直接尝试 .text，不先 hasattr（因为 hasattr 会触发 property 的异常）
+    try:
+        return item.text
+    except (ValueError, AttributeError):
+        pass
+    
+    # 兜底：通过 node.get_content()
+    if hasattr(item, 'node') and hasattr(item.node, 'get_content'):
+        try:
+            return item.node.get_content()
+        except Exception:
+            pass
+    return ""
+
 
 def web_search_node(state: RAGState):
     tavilyClient = TavilyClient(os.getenv("TAVILY_API_KEY"))
@@ -63,41 +93,46 @@ def web_search_node(state: RAGState):
         return f"搜索报错：{e}"
 
 def rerank_node(state: RAGState):
-    doc_list = [item.text for item in state.get("results", [])]
+    # 兼容 dict 和 NodeWithScore 对象
+    doc_list = [_get_text(item) for item in state.get("results", [])]
 
     model = CrossEncoder("BAAI/bge-reranker-v2-m3")
-
     reranked = model.rank(state.get("question", ""), doc_list)
 
-    return {"reranked": reranked}
+    clean = []
+    for item in reranked:
+        clean.append({
+            "score": float(item["score"]),
+            "corpus_id": int(item["corpus_id"])
+        })
+    return {"reranked": clean}
+
 
 def format_answer_node(state: RAGState):
     reranked = state.get("reranked", [])
+    results = state.get("results", [])
     idx = reranked[0].get("corpus_id", -1)
-    answer = state.get("results", [])[idx].text
-    
+    answer = _get_text(results[idx])
     return {"answer": answer}
 
 def uncertain_answer_node(state: RAGState):
     reranked = state.get("reranked", [])
     results = state.get("results", [])
-    # idx = reranked[0].get("corpus_id", -1)
-    # answer = state.get("results", [])[idx].text
     candidates = []
 
     for item in reranked[:3]:
         idx = item.get('corpus_id', -1)
         score = item.get('score', -10)
-        res = results[idx]
         
         if 0 <= idx < len(results):
-            text = res.text[:300]
+            text = _get_text(results[idx])[:300]
         else:
             text = "（内容缺失）"
-        candidates.append(f"【置信度】 {score} {text}")       
-    
+        candidates.append(f"【置信度 {score:.0%}】 {text}")  
+
     answer = "以下结果置信度中等，请自行判断: \n\n" + "\n---\n".join(candidates)
     return {"answer": answer}
+
 
 def no_result_node(state: RAGState):
     answer = web_search_node(state)
@@ -138,8 +173,67 @@ graph.add_edge("format_answer", END)
 graph.add_edge("no_result", END)
 graph.add_edge("uncertain_answer", END)
 
-app = graph.compile()
+# checkpointer = InMemorySaver()
+checkpointer = SqliteSaver(sqlite3.connect("checkpoints.db", check_same_thread=False))
+
+app = graph.compile(checkpointer = checkpointer)
 
 # ======== 5. 跑 ========
-result = app.invoke({"question": "如何在阿德莱德游玩"})
-print(f"result: {result}")
+
+config = {"configurable": {"thread_id": 1}}
+result1 = app.invoke({"question": "如何在阿德莱德游玩"}, config)
+
+print("=" * 60)
+print("【第一次运行 - 正常流程】")
+print(f"answer: {result1.get('answer', 'NO ANSWER')[:150]}...")
+print(f"results 数量: {len(result1.get('results', []))}")
+print(f"reranked 数量: {len(result1.get('reranked', []))}")
+
+# --- 回到 retrieve 之后，注入假数据 ---
+history = list(app.get_state_history(config))
+checkpoint_before_rerank = history[1]
+
+fake_result = {
+    "text": "【注入数据】阿德莱德是南澳大利亚州的首府，以葡萄酒产区、海滩和艺术节闻名。",
+    "score": 0.6
+}
+
+app.update_state(
+    checkpoint_before_rerank.config,
+    {"results": [fake_result] + checkpoint_before_rerank.values["results"]}
+)
+
+# --- 重新从 retrieve 之后运行 ---
+result2 = app.invoke(None, checkpoint_before_rerank.config)
+
+print("=" * 60)
+print("【第二次运行 - 注入 fake_result 后重新跑】")
+print(f"answer: {result2.get('answer', 'NO ANSWER')[:150]}...")
+print(f"results 数量: {len(result2.get('results', []))}")
+print(f"reranked 数量: {len(result2.get('reranked', []))}")
+
+# --- 对比结果 ---
+print("=" * 60)
+print("【对比】")
+print(f"修改前 answer: {result1.get('answer', '')[:100]}")
+print(f"修改后 answer: {result2.get('answer', '')[:100]}")
+
+# --- 查看完整历史时间线 ---
+print("=" * 60)
+print("【历史步骤时间线】")
+for snap in app.get_state_history(config):
+    step = snap.metadata.get("step", "?")
+    task = snap.metadata.get("source", "?")
+
+    # 截取 answer 前 60 字显示
+    ans = snap.values.get("answer", "")
+    if isinstance(ans, str) and ans:
+        ans_preview = ans[:60].replace("\n", " ")
+    else:
+        ans_preview = "(无)"
+
+    # 显示 results 数量
+    res = snap.values.get("results", [])
+    res_count = len(res) if res else 0
+
+    print(f"  Step {step} | node: {task} | results: {res_count}个 | answer: {ans_preview}")
