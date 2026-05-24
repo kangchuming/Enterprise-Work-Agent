@@ -1,3 +1,5 @@
+import json
+
 class History:
     """最简历史管理——从 nanobot session/manager.py 掠夺"""
 
@@ -38,7 +40,7 @@ class History:
         total = 0
 
         for t in reversed(messages):
-            tokens = self._count_token(str(t.get("content", ""))) 
+            tokens = self._count_token(json.dumps(t)) 
             if kept and total + tokens > budget:
                 break
             kept.append(t)
