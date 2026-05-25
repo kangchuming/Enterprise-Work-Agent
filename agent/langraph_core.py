@@ -515,9 +515,8 @@ def should_continue(state: AgentState) -> Literal["execute", "finish"]:
     if step_logs:
         last_log = step_logs[-1]
         ob = last_log["observation"]
-        success = ob["success"]
-        if success:
-            log.info("操作完成，结束", step=state["step"], max_step=state.get("max_step", 5), ob = ob["content"][:200])
+        if isinstance(ob, dict) and ob.get("success"):
+            log.info("操作完成，结束", step=state["step"])
             return "finish"
        
 
