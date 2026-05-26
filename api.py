@@ -7,12 +7,37 @@ from langgraph.types import Command
 import sqlite3
 import os
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text
+from datetime import datetime
 
 load_dotenv()
 
 # ====== 1. 初始化 LangGraph（和 main_langraph.py 一样）======
 checkpointer = SqliteSaver(sqlite3.connect("checkpoints.db", check_same_thread=False))
 app_graph = graph.compile(checkpointer=checkpointer)
+
+# 创建引擎 —— SQLite 只需要一个文件路径
+engine = create_engine("sqlite:///app.db", echo=False)
+
+# 1.2 声明基类 —— 所有 Model 都继承它
+class Base(DeclarativeBase):
+    pass
+
+# 1.5. 定义表
+class Conversation(Base):
+    __tablename__ = "conversation"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[int] = mapped_column(Integer)
+    input: Mapped[str] = mapped_column(Text)
+    user: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(50))
+    answer: Mapped[str] = mapped_column(Text)
+
+# 1.8 建表
+Base.metadata.create_all(engine)
 
 # ====== 2. FastAPI 应用 ======
 app = FastAPI(
@@ -29,6 +54,7 @@ class ChatRequest(BaseModel):
     resource: str
 
 class ResumeRequest(BaseModel):
+    user: str
     decision:  str
     thread_id: int
 # ====== 4. 辅助函数：从 result 里提取最终回答 ======
@@ -50,6 +76,22 @@ def build_interrupt_response(interrupt_key: str, result, req):
             "thread_id": req.thread_id
         }
     return None
+
+def save_conversation(req, answer: str, status: str):
+    try:
+        with Session(engine) as session:
+            conv = Conversation(
+                thread_id = req.thread_id,
+                input = getattr(req, "input", req.decision if hasattr(req, "decision") else ''),
+                user = getattr(req, 'user', ""),
+                answer = answer,
+                status = status
+            )
+            session.add(conv)
+            session.commit()
+    except Exception as e:
+        print(f"操作报错: {e}")
+
 # ====== 5. 接口定义 ======
 @app.get("/health")
 async def getHealth():
@@ -61,11 +103,19 @@ async def chat(req: ChatRequest):
     result = app_graph.invoke({"input": req.input, "user": req.user, "resource": req.resource}, config)
     interrupt_resp = build_interrupt_response("__interrupt__", result, req)
     if interrupt_resp:
+        answer = extract_answer(result)
+        status = interrupt_resp.get("status", '')
+        save_conversation(req, answer, status)
+
         return interrupt_resp
     else:
+        answer = extract_answer(result)
+        status = 'completed'
+        save_conversation(req, answer, status)
+
         return {
-            "status": 'completed',
-            "answer": extract_answer(result),
+            "status": status,
+            "answer": answer,
             "thread_id": req.thread_id,
             "step": result["step"]
         }
@@ -77,11 +127,19 @@ async def resume(req: ResumeRequest):
     interrupt_resp = build_interrupt_response("__interrupt__", result, req)
 
     if interrupt_resp:
+        answer = extract_answer(result)
+        status = interrupt_resp.get("status", '')
+        save_conversation(req, answer, status)
+
         return interrupt_resp
     else:
+        answer = extract_answer(result)
+        status = 'completed'
+        save_conversation(req, answer, status)
+
         return {
-            "status": 'completed',
-            "answer": extract_answer(result),
+            "status": status,
+            "answer": answer,
             "thread_id": req.thread_id,
             "step": result["step"]
         }
