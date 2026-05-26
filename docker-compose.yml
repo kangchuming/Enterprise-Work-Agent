@@ -1,0 +1,17 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: enterprise-agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./app.db:/app/app.db
+      - ./checkpoints.db:/app/checkpoints.db
+      - ./chroma:/app/chroma
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    restart: unless-stopped
