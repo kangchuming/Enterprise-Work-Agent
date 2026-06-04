@@ -11,6 +11,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text
 from datetime import datetime
+from tools.semantic_cache import SemanticCache
+from sentence_transformers import SentenceTransformer
+
 
 load_dotenv()
 
@@ -20,6 +23,21 @@ app_graph = graph.compile(checkpointer=checkpointer)
 
 # 创建引擎 —— SQLite 只需要一个文件路径
 engine = create_engine("sqlite:///app.db", echo=False)
+
+class STEmbedding:
+    def __init__(self, model_name="BAAI/bge-small-zh-v1.5"):
+        self.model=SentenceTransformer(model_name, local_files_only=True)
+    def embed_query(self, input: str):
+        return self.model.encode(input)
+
+embedding_model = STEmbedding()
+cache = SemanticCache(
+    embedding_model=embedding_model,
+    similarity_threshold=0.72,
+    ttl=86400
+)
+cache_hits = 0
+cache_misses = 0
 
 # 1.2 声明基类 —— 所有 Model 都继承它
 class Base(DeclarativeBase):
@@ -99,6 +117,20 @@ async def getHealth():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    global cache_hits, cache_misses
+    cached = cache.lookup(req.input)
+
+    if cached:
+        cache_hits += 1
+        save_conversation(req, cached, "cache_hit")
+
+        return {
+            "status": "cache_hit",
+            "answer": cached,
+            "thread_id": req.thread_id,
+            "from_cache": True
+        }
+    cache_misses += 1
     config = {"configurable": {"thread_id": req.thread_id}}
     result = app_graph.invoke({"input": req.input, "user": req.user, "resource": req.resource}, config)
     interrupt_resp = build_interrupt_response("__interrupt__", result, req)
@@ -112,6 +144,9 @@ async def chat(req: ChatRequest):
         answer = extract_answer(result)
         status = 'completed'
         save_conversation(req, answer, status)
+
+        if "调用 LLM 出错" not in answer and "Error" not in answer:
+            cache.save(req.input, answer)
 
         return {
             "status": status,
@@ -144,3 +179,15 @@ async def resume(req: ResumeRequest):
             "step": result["step"]
         }
 
+@app.get("/cache/status")
+async def cache_status():
+    global cache_hits, cache_misses
+    cache_all = cache_misses + cache_hits
+    hits_rate = (cache_hits / cache_all * 100) if cache_all > 0 else 0.0
+
+    return {
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "hits_rate": hits_rate,
+        "cache_keys": cache.count() 
+    }

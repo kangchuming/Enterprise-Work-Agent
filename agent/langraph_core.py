@@ -452,60 +452,65 @@ def guard_check_and_execute(state: AgentState):
     if not tool_calls:
         return {}
 
-    tc = tool_calls[0]
-    tool_name = tc["function"]["name"]
-    tool_args = json.loads(tc["function"]["arguments"])
-    tool_call_id = tc["id"]
+    all_messages = []
+    all_logs = []
 
-    action = TOOL_ACTION_MAP.get(tool_name, 'unknown')
-    user = state.get("user", "admin")
-    resource = state.get("resource", "data")
+    for tc in tool_calls:
+        tool_name = tc["function"]["name"]
+        tool_args = json.loads(tc["function"]["arguments"])
+        tool_call_id = tc["id"]
 
-    log.info("权限检查", step=state["step"], tool=tool_name, action=action, user=user, resource=resource)
+        action = TOOL_ACTION_MAP.get(tool_name, 'unknown')
+        user = state.get("user", "admin")
+        resource = state.get("resource", "data")
 
-    if not enforcer.enforce(user, resource, action):
-        observation = f"权限不足：{user} 无权对 {resource} 执行 {action}"
-        log.warn("权限不足", user=user, resource=resource, action=action)
-        return {
-            "messages": [{
-                        'role': 'tool',
-                        'name': tool_name,
-                        'tool_call_id': tool_call_id,
-                        'content': observation["content"]
-                        
-            }],
-            "step_logs": [{
-                "step": state["step"],
-                "tool": tool_name,
-                "args": tool_args,
-                "observation": observation
-            }]
-        }
+        log.info("权限检查", step=state["step"], tool=tool_name, action=action, user=user, resource=resource)
 
-    # 新增：高危操作中断审批
-    if tool_name in ["tavily_search", "run_bash"]:
-        decision = interrupt(f"是否批准 {tool_name}？参数: {tool_args}")
-        if decision != 'yes':
-            return {"messages": [{"role": "tool", "content": "被用户拒绝"}]}
+        if not enforcer.enforce(user, resource, action):
+            observation = f"权限不足：{user} 无权对 {resource} 执行 {action}"
+            log.warn("权限不足", user=user, resource=resource, action=action)
+            all_messages.append({
+                            'role': 'tool',
+                            'name': tool_name,
+                            'tool_call_id': tool_call_id,
+                            'content': observation
+                            
+            })
+            all_logs.append({
+                    "step": state["step"],
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "observation": observation
+            }) 
+            continue
 
-    observation = _execute_tool(tool_name, tool_args)
-    log.info("工具执行完成", tool=tool_name, observation=observation["content"][:200])
+        # 新增：高危操作中断审批
+        if tool_name in ["tavily_search", "run_bash"]:
+            decision = interrupt(f"是否批准 {tool_name}？参数: {tool_args}")
+            if decision != 'yes':
+                all_messages.append({"role": "tool", "content": "被用户拒绝"})
+                continue
+
+        observation = _execute_tool(tool_name, tool_args)
+        log.info("工具执行完成", tool=tool_name, observation=observation["content"][:200])
+
+        all_messages.append({
+            'role': 'tool',
+            'name': tool_name,
+            'tool_call_id': tool_call_id,
+            'content': observation["content"]
+        })
+        all_logs.append({
+            "step": state["step"],
+            "tool": tool_name,
+            "args": tool_args,
+            "observation": observation
+        })
 
     return {
-        "messages": [
-            {
-                'role': 'tool',
-                'name': tool_name,
-                'tool_call_id': tool_call_id,
-                'content': observation["content"]
-            }
-        ],
-        "step_logs": [{
-                "step": state["step"],
-                "tool": tool_name,
-                "args": tool_args,
-                "observation": observation
-        }]
+        "messages": all_messages,
+        "step_logs": all_logs,
+        "tool_calls": [],
     }
 
 # ====== 3. 条件路由 ======
@@ -535,6 +540,7 @@ def finish(state: AgentState):
     global _sbx
     if _sbx is not None:
         _sbx.kill()
+        _sbx = None
         _sbx = None
 
     final_answer = ""
