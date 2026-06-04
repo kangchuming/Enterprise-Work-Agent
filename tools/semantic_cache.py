@@ -48,7 +48,6 @@ class SemanticCache:
 
             if cursor == 0:
                 break
-        print(f"best_sim, {best_sim}, best_answer, {best_answer}")
         return best_answer if best_sim >= self.threshold else None
 
     # ─── 核心：存缓存 ───
