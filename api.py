@@ -78,10 +78,16 @@ class ResumeRequest(BaseModel):
 # ====== 4. 辅助函数：从 result 里提取最终回答 ======
 def extract_answer(result):
     try:
-        message = list(reversed(result.get("messages", [])))[0]
+        messages = result.get("messages", [])
+
+        if not messages:
+            return "No response generated"
+
+        message = list(reversed(messages))[0]
 
         if message.get("role", '') == 'assistant' and  message["content"]:
             return message.get("content", "")
+        return "No answer found"
     except Exception as e:
             return f"错误{e}"
 

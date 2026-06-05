@@ -350,13 +350,13 @@ TOOL_EXECUTORS = {
 
 
 # ====== 统一入口：一行分发 ======
-def _execute_tool(tool_name: str, tool_args: dict) -> str:
+def _execute_tool(tool_name: str, tool_args: dict) -> dict:
     """执行工具，通过注册表分发"""
     log.info("开始执行工具", tool=tool_name, args=str(tool_args)[:200])
     executor = TOOL_EXECUTORS.get(tool_name)
     if executor is None:
         log.error("未知工具", tool_name=tool_name)
-        return f"未知工具: {tool_name}"
+        return {"success": False, "content": tool_name}
     try:
         return {"success": True, "content": executor(tool_args)}
     except PermissionError as e:
@@ -364,7 +364,7 @@ def _execute_tool(tool_name: str, tool_args: dict) -> str:
         return {"success": False, "content": f"拒绝操作: {e}"}
     except Exception as e:
         log.error("工具执行出错", tool=tool_name, error=e)
-        return {"success": True, "content": f"错误: {e}"}
+        return {"success": False, "content": f"错误: {e}"}
 
 def prepare_prompt(state: AgentState):
     """构建 system prompt + 拼接历史"""
@@ -469,61 +469,61 @@ def guard_check_and_execute(state: AgentState):
         if not enforcer.enforce(user, resource, action):
             observation = f"权限不足：{user} 无权对 {resource} 执行 {action}"
             log.warn("权限不足", user=user, resource=resource, action=action)
+
             all_messages.append({
-                            'role': 'tool',
-                            'name': tool_name,
-                            'tool_call_id': tool_call_id,
-                            'content': observation
-                            
+                        'role': 'tool',
+                        'name': tool_name,
+                        'tool_call_id': tool_call_id,
+                        'content': observation              
             })
             all_logs.append({
-                    "step": state["step"],
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "observation": observation
-            }) 
+                "step": state["step"],
+                "tool": tool_name,
+                "args": tool_args,
+                "observation": observation
+            })
             continue
 
         # 新增：高危操作中断审批
         if tool_name in ["tavily_search", "run_bash"]:
             decision = interrupt(f"是否批准 {tool_name}？参数: {tool_args}")
             if decision != 'yes':
-                all_messages.append({"role": "tool", "content": "被用户拒绝"})
+                all_messages.append({"role": "tool", "content": "被用户拒绝", "tool_call_id": tool_call_id, 'name': tool_name})
+                all_logs.append({
+                    "step": state["step"],
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "observation":  "被用户拒绝",
+                    'name': tool_name
+                })
                 continue
 
         observation = _execute_tool(tool_name, tool_args)
         log.info("工具执行完成", tool=tool_name, observation=observation["content"][:200])
-
+        
         all_messages.append({
-            'role': 'tool',
-            'name': tool_name,
-            'tool_call_id': tool_call_id,
-            'content': observation["content"]
+            "role": "tool", 
+            "content": observation["content"], 
+            "tool_call_id": tool_call_id, 
+            'name': tool_name
         })
+
         all_logs.append({
             "step": state["step"],
             "tool": tool_name,
             "args": tool_args,
             "observation": observation
         })
-
+        
     return {
         "messages": all_messages,
         "step_logs": all_logs,
-        "tool_calls": [],
+        "tool_calls": []
     }
 
 # ====== 3. 条件路由 ======
 def should_continue(state: AgentState) -> Literal["execute", "finish"]:
     step_logs = state.get("step_logs", [])
-
-    if step_logs:
-        last_log = step_logs[-1]
-        ob = last_log["observation"]
-        if isinstance(ob, dict) and ob.get("success"):
-            log.info("操作完成，结束", step=state["step"])
-            return "finish"
-       
 
     if state.get("step", 0) >= state.get("max_step", 5):
         log.warn("达到最大步数限制，结束", step=state["step"], max_step=state.get("max_step", 5))
@@ -540,7 +540,6 @@ def finish(state: AgentState):
     global _sbx
     if _sbx is not None:
         _sbx.kill()
-        _sbx = None
         _sbx = None
 
     final_answer = ""
