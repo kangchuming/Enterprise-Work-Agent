@@ -3,7 +3,7 @@ import json
 class History:
     """最简历史管理——从 nanobot session/manager.py 掠夺"""
 
-    def __init__(self, max_messages: int = 50, max_token: int = 4000):
+    def __init__(self, max_messages: int = 50, max_token: int = 16000):
         #初始化对话消息
         self.messages:list[dict] = []
         self.max_messages = max_messages
@@ -47,6 +47,12 @@ class History:
             total += tokens
 
         kept.reverse()
+
+        for i, msg in enumerate(kept):
+            if msg.get('role') == 'tool':
+                if i == 0 or kept[i-1].get('role') != 'assistant' or 'tool_calls' not in kept[i-1]:
+                    # 孤立的 tool 消息，从这条开始截断
+                    return kept[:i]
         return kept
     
     def _align_to_user_start(self, messages: list[dict]) -> list[dict]:

@@ -1,5 +1,7 @@
 import json
 from openai import OpenAI
+from langsmith import traceable, get_current_run_tree
+from langsmith.wrappers import wrap_openai
 from agent.identity import get_identity_prompt
 from langgraph.types import interrupt
 from dotenv import load_dotenv
@@ -222,7 +224,10 @@ max_token = 8000
 api_key = os.getenv("OPENAI_API_KEY")
 base_url = os.getenv("OPENAI_BASE_URL")
 model = os.getenv("MODEL_NAME")
-client = OpenAI(api_key=api_key, base_url=base_url)
+cheap_model = os.getenv("CHEAP_MODEL_NAME")
+expensive_model = os.getenv("EXPENSIVE_MODEL_NAME")
+_raw_client = OpenAI(api_key=api_key, base_url=base_url)
+client = wrap_openai(_raw_client)   # ← LangSmith 自动拦截所有 API 调用
 enforcer = casbin.Enforcer('config/model.conf', 'config/policy.csv')
 history = History(max_messages=max_messages, max_token=max_token)
 log = get_audit_logger(agent="Agent", model=model)
@@ -387,6 +392,47 @@ def prepare_prompt(state: AgentState):
         "messages": msgs_to_add
     }
 
+def _classify_intent(query: str) -> str:
+    """
+    用便宜模型判断用户意图复杂度。
+    返回 "simple" 或 "complex"。
+    分类失败时默认返回 "simple"（走便宜模型，安全优先）。
+    """
+    try:
+        resp = client.chat.completions.create(
+            model=cheap_model,  # 用最便宜的模型做分类
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "判断用户请求的复杂度，只输出一个单词：simple 或 complex。\n\n"
+                        "simple：单步操作、简单问答、基础文件读写、定义查询。\n"
+                        "  例：'读取 README.md'、'创建 test.txt'、'什么是 Python'\n\n"
+                        "complex：多步推理、代码生成、架构分析、方案设计、代码审查。\n"
+                        "  例：'分析项目架构'、'写一个登录系统'、'找出代码安全问题'\n\n"
+                        "只输出 simple 或 complex，不要其他内容。"
+                    )
+                },
+                {"role": "user", "content": query}
+            ],
+            max_tokens=500,
+            temperature=0,
+            langsmith_extra={
+                "metadata": {"classifier_model": cheap_model}
+            }
+        )
+        msg = resp.choices[0].message
+        assistant_msg = {"role": "assistant", "content": msg.content}
+
+        # DeepSeek 思考模式需要回传 reasoning_content
+        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            assistant_msg["reasoning_content"] = msg.reasoning_content
+
+        content = (resp.choices[0].message.content or '').strip().lower()
+        return content if content in ('simple', 'complex') else 'simple'
+    except Exception:
+        return 'simple' # 分类失败默认走便宜模型
+
 def call_llm(state: AgentState):
     """调用 LLM"""
     history.messages = state["messages"]
@@ -394,13 +440,38 @@ def call_llm(state: AgentState):
     step = state.get("step", 0) + 1
     log.info("LLM 调用开始", step=step, msg_count=len(msgs), str_len=sum(len(str(m.get("content", ""))) for m in msgs))
 
+    user_input = state.get('input', '')
+    intent = _classify_intent(user_input)
+    selected_model = cheap_model if intent == 'simple' else expensive_model
+
+    run = get_current_run_tree()
+
+    if run:
+        run.add_metadata({
+            "intent": intent,
+            "model": selected_model
+        })
+
+    log.info("模型路由",
+             step=step,
+             intent=intent,
+             selected_model=selected_model,
+             query_preview=user_input[:80])
+
     try:
         response = client.chat.completions.create(
-            model = model,
+            model = selected_model,
             messages = msgs,
             tools = TOOLS,
             tool_choice = "auto",
-            stream = False
+            stream = False,
+            langsmith_extra={  # ← ✅ 两本指南都推荐的方式
+                "metadata": {
+                    "intent": intent,
+                    "model": selected_model,
+                    "step": step,
+                }
+            }
         )
         
         msg = response.choices[0].message
@@ -587,3 +658,6 @@ graph.add_conditional_edges(
 
 graph.add_edge("execute", "llm")
 graph.add_edge('finish', END)
+
+if __name__ == "__main__":
+    _classify_intent("帮我设计一个微服务架构")

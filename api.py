@@ -1,6 +1,7 @@
 # api.py
 from fastapi import FastAPI
 from pydantic import BaseModel
+from langsmith import traceable, get_current_run_tree
 from agent.langraph_core import graph
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
@@ -122,12 +123,20 @@ async def getHealth():
     return {"status": "ok", "service": "ai agent"}
 
 @app.post("/chat")
+@traceable(name="chat_endpoint", run_type="chain")
 async def chat(req: ChatRequest):
     global cache_hits, cache_misses
     cached = cache.lookup(req.input)
+    run = get_current_run_tree()
 
     if cached:
         cache_hits += 1
+
+        if run:
+            run.add_metadata({
+                "cached": 'hits',
+                "cache_hits_number": cache_hits
+        })
         save_conversation(req, cached, "cache_hit")
 
         return {
@@ -136,8 +145,24 @@ async def chat(req: ChatRequest):
             "thread_id": req.thread_id,
             "from_cache": True
         }
+        
+        
     cache_misses += 1
-    config = {"configurable": {"thread_id": req.thread_id}}
+
+    if run:
+            run.add_metadata({
+                "cached": 'miss',
+                "cache_hits_number": cache_hits
+            })
+
+    config = {
+            "configurable": {"thread_id": req.thread_id}, 
+            "metadata": {
+                "user": req.user,
+                "thread_id": req.thread_id,
+                "resource": req.resource,
+            }
+    }
     result = app_graph.invoke({"input": req.input, "user": req.user, "resource": req.resource}, config)
     interrupt_resp = build_interrupt_response("__interrupt__", result, req)
     if interrupt_resp:
