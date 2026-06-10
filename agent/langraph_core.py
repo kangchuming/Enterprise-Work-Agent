@@ -464,7 +464,7 @@ def call_llm(state: AgentState):
             messages = msgs,
             tools = TOOLS,
             tool_choice = "auto",
-            stream = False,
+            stream = True,
             langsmith_extra={  # ← ✅ 两本指南都推荐的方式
                 "metadata": {
                     "intent": intent,
@@ -474,33 +474,52 @@ def call_llm(state: AgentState):
             }
         )
         
-        msg = response.choices[0].message
-        assistant_msg = {"role": "assistant", "content": msg.content}
+        # ---- 拼接流式 chunks ----
+        collected_content = ""
+        collected_tool_calls = {} 
 
-        # DeepSeek 思考模式需要回传 reasoning_content
-        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
-            assistant_msg["reasoning_content"] = msg.reasoning_content
+        for chunk in response:   # ← 只留这一层
+            delta = chunk.choices[0].delta
+                
+            if delta.content:
+                collected_content += delta.content  # 逐字拼接
+            
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in collected_tool_calls:
+                        collected_tool_calls[idx] = {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""}
+                        }
+                    if tc_delta.id:
+                        collected_tool_calls[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            collected_tool_calls[idx]["function"]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            collected_tool_calls[idx]["function"]["arguments"] += tc_delta.function.arguments
 
-        if msg.tool_calls:
+
+        assistant_msg = {"role": "assistant", "content": collected_content}
+
+        if collected_tool_calls:
             assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                } 
-                for tc in msg.tool_calls
+                collected_tool_calls[i]
+                for i in sorted(collected_tool_calls.keys())
             ]
+        
+                # ---- 流式版本 return（替换旧代码）----
+        if collected_tool_calls:
             log.info("LLM 返回工具调用", tool_calls=assistant_msg["tool_calls"])
             return {
                 "messages": [assistant_msg],
                 "tool_calls": assistant_msg["tool_calls"],
-                "step": step  
+                "step": step
             }
         else:
-            log.info("LLM 直接回复", content=str(msg.content)[:200])
+            log.info("LLM 直接回复", content=str(collected_content)[:200])
             return {
                 "messages": [assistant_msg],
                 "tool_calls": [],
@@ -659,5 +678,3 @@ graph.add_conditional_edges(
 graph.add_edge("execute", "llm")
 graph.add_edge('finish', END)
 
-if __name__ == "__main__":
-    _classify_intent("帮我设计一个微服务架构")
